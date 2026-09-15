@@ -6,13 +6,16 @@ import CesiumGlobe from "./components/CesiumGlobe.vue";
 import ConstellationScatter from "./components/ConstellationScatter.vue";
 import ControlPanel from "./components/ControlPanel.vue";
 
-const mode = ref<"all" | "constellation">("all");
+const mode = ref<"all" | "constellation">("constellation");
 const multiplier = ref(Number(import.meta.env.VITE_DEFAULT_M ?? 1));
 const showOrbits = ref(true);
 const selectedGroup = ref("");
 const groups = ref<GroupInfo[]>([]);
 const allSatellites = ref<TleRecord[]>([]);
 const groupCache = ref<Record<string, TleRecord[]>>({});
+// Cesium 视图中勾选要显示的星座群（默认全部）
+const cesiumGroups = ref<string[]>([]);
+const cesiumGroupsInit = ref(false);
 const loading = ref(false);
 const dataError = ref("");
 const refreshPeriod = ref(7200);
@@ -22,9 +25,15 @@ const currentGroupSats = computed<TleRecord[]>(
   () => groupCache.value[selectedGroup.value] ?? [],
 );
 
+// Cesium 视图：仅绘制被勾选的星座群
+const cesiumSelectedSet = computed(() => new Set(cesiumGroups.value));
+const filteredCesiumSats = computed(() =>
+  allSatellites.value.filter((s) => cesiumSelectedSet.value.has(s.group_name)),
+);
+
 const satelliteCount = computed(() =>
   mode.value === "all"
-    ? allSatellites.value.length
+    ? filteredCesiumSats.value.length
     : currentGroupSats.value.length,
 );
 
@@ -37,6 +46,14 @@ async function loadGroups() {
     );
     if (withData.length && !selectedGroup.value) {
       selectedGroup.value = withData[0].group_name;
+    }
+    // Cesium 星座筛选：首次加载默认全选，之后仅剔除已下线的群、保留用户勾选
+    if (!cesiumGroupsInit.value) {
+      cesiumGroups.value = g.map((x) => x.group_name);
+      cesiumGroupsInit.value = true;
+    } else {
+      const valid = new Set(g.map((x) => x.group_name));
+      cesiumGroups.value = cesiumGroups.value.filter((n) => valid.has(n));
     }
   } catch (e) {
     dataError.value = `获取星座列表失败：${(e as Error).message}`;
@@ -118,6 +135,7 @@ function onStats(s: { added: number; skipped: number }) {
       v-model:multiplier="multiplier"
       v-model:showOrbits="showOrbits"
       v-model:selectedGroup="selectedGroup"
+      v-model:cesiumGroups="cesiumGroups"
       :groups="groups"
       :loading="loading"
       :satellite-count="satelliteCount"
@@ -128,7 +146,7 @@ function onStats(s: { added: number; skipped: number }) {
     <main class="content">
       <div class="content-head">
         <span v-if="mode === 'all'">全部卫星 · Cesium 三维视图</span>
-        <span v-else>星座聚类 · {{ selectedGroup || "—" }}</span>
+        <span v-else>星座轨道分析（聚类）· {{ selectedGroup || "—" }}</span>
         <span v-if="mode === 'all'" class="stat">
           已绘制 {{ cesiumStats.added }} 颗<span v-if="cesiumStats.skipped">
             （跳过 {{ cesiumStats.skipped }}）</span
@@ -144,7 +162,7 @@ function onStats(s: { added: number; skipped: number }) {
       <div class="view">
         <CesiumGlobe
           v-if="mode === 'all'"
-          :satellites="allSatellites"
+          :satellites="filteredCesiumSats"
           :multiplier="multiplier"
           :show-orbits="showOrbits"
           @stats="onStats"
