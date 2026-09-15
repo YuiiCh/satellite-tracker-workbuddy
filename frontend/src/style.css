@@ -1,0 +1,38 @@
+:root {
+  --bg: #07111d;
+  --panel: #0d1b2a;
+  --panel-2: #11263a;
+  --border: #1d3346;
+  --text: #e6f3ff;
+  --muted: #9fc6e0;
+  --accent: #4fd1ff;
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  font-size: 14px;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: var(--accent);
+}
