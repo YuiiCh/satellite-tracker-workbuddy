@@ -1,4 +1,0 @@
-[[app]]
-name = "app"
-port = 3_000
-cmd = 'cd "/workspace/frontend" && PORT=3000 node server.cjs'
