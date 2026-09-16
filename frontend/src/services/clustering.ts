@@ -1,10 +1,15 @@
 // 一维基于“间隔”的聚类：用于把卫星按倾角 / 轨道高度分壳层。
 // 倾角/高度相近的卫星归为一类，间隔超过 minGap 则断开。
+// minGap 可为常数，也可为函数 (value) => 阈值：用于“低轨更细、高轨更粗”的自适应粒度。
 import type { Cluster } from "../types";
 
-export function cluster1D(values: number[], minGap: number): Cluster[] {
+export function cluster1D(
+  values: number[],
+  minGap: number | ((value: number) => number),
+): Cluster[] {
   const n = values.length;
   if (n === 0) return [];
+  const gapFor = (v: number) => (typeof minGap === "function" ? minGap(v) : minGap);
 
   // 携带原始下标后按数值排序
   const indexed = values.map((value, index) => ({ value, index }));
@@ -20,7 +25,8 @@ export function cluster1D(values: number[], minGap: number): Cluster[] {
 
   for (let k = 1; k < n; k++) {
     const gap = indexed[k].value - indexed[k - 1].value;
-    if (gap > minGap) {
+    // 以间隔低端数值决定本间隔的判定阈值（低轨卫星用更细的聚类粒度）
+    if (gap > gapFor(indexed[k - 1].value)) {
       clusters.push(current);
       current = {
         label: "",

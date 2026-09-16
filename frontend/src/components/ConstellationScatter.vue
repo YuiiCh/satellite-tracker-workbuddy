@@ -9,8 +9,10 @@ const props = defineProps<{
   satellites: TleRecord[];
 }>();
 
-// 倾角聚类间隔（度）与高度聚类间隔（km），可用环境变量覆盖
+// 倾角聚类间隔（度）与高度分箱粒度（km），可用环境变量覆盖。
+// 高度采用固定分箱：低轨（<2000km）以 LEO_ALT_GAP=50km 为粒度，高轨以 ALT_GAP 为粒度。
 const INCL_GAP = Number(import.meta.env.VITE_INCL_GAP ?? 3);
+const LEO_ALT_GAP = Number(import.meta.env.VITE_LEO_ALT_GAP ?? 50);
 const ALT_GAP = Number(import.meta.env.VITE_ALT_GAP ?? 300);
 
 const ALT_PALETTE = [
@@ -44,23 +46,23 @@ const charts = computed<ChartConfig[]>(() => {
   const result: ChartConfig[] = [];
   for (const ic of inclClusters) {
     const sub = ic.indices.map((i) => elements[i]);
-    // 第二层：在同一倾角壳层内按轨道高度聚类
-    const altValues = sub.map((e) => e.altitudeKm);
-    const altClusters = cluster1D(altValues, ALT_GAP);
+    // 第二层：在同一倾角壳层内按固定高度分箱（低轨 50km，高轨 ALT_GAP）
+    // 用固定分箱而非间隔聚类，保证低轨以约 50km 的均匀粒度呈现壳层。
+    const bins = new Map<number, { lo: number; hi: number; items: (typeof sub)[number][] }>();
+    for (const e of sub) {
+      const step = e.altitudeKm < 2000 ? LEO_ALT_GAP : ALT_GAP;
+      const lo = Math.floor(e.altitudeKm / step) * step;
+      if (!bins.has(lo)) bins.set(lo, { lo, hi: lo + step, items: [] });
+      bins.get(lo)!.items.push(e);
+    }
+    const altBins = [...bins.values()].sort((a, b) => a.lo - b.lo);
 
-    const series: ScatterSeries[] = altClusters.map((ac, j) => {
-      const data: [number, number][] = ac.indices.map((k) => {
-        const e = sub[k];
-        return [
-          Math.round(e.raanDeg * 10) / 10,
-          Math.round(e.argLatDeg * 10) / 10,
-        ];
-      });
-      const span = ac.max - ac.min;
-      const name =
-        span < 50
-          ? `高度 ≈${Math.round((ac.min + ac.max) / 2)} km（${ac.indices.length}）`
-          : `高度 ${Math.round(ac.min)}~${Math.round(ac.max)} km（${ac.indices.length}）`;
+    const series: ScatterSeries[] = altBins.map((b, j) => {
+      const data: [number, number][] = b.items.map((e) => [
+        Math.round(e.raanDeg * 10) / 10,
+        Math.round(e.argLatDeg * 10) / 10,
+      ]);
+      const name = `高度 ${b.lo}~${b.hi} km（${b.items.length}）`;
       return {
         name,
         color: ALT_PALETTE[j % ALT_PALETTE.length],
@@ -70,7 +72,7 @@ const charts = computed<ChartConfig[]>(() => {
 
     result.push({
       title: `倾角壳层 ${ic.label}°`,
-      subtitle: `${sub.length} 颗 · ${altClusters.length} 个高度壳层`,
+      subtitle: `${sub.length} 颗 · ${altBins.length} 个高度壳层`,
       series,
     });
   }

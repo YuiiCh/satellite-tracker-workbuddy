@@ -36,6 +36,8 @@ class Settings:
         [
             "starlink",
             "oneweb",
+            "qianfan",
+            "hulianwang",
             "iridium-NEXT",
             "globalstar",
             "orbcomm",
