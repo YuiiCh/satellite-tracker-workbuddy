@@ -1,197 +1,87 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, watch } from "vue";
-import * as Cesium from "cesium";
-import "cesium/Build/Cesium/Widgets/widgets.css";
 import type { TleRecord } from "../types";
-import {
-  parseSatrec,
-  sampleTrackEci,
-} from "../services/orbital";
+import { SatelliteScene, type SceneReadout } from "../services/cesiumScene";
+import type { SatInput } from "../services/orbital.worker";
 
 const props = defineProps<{
   satellites: TleRecord[];
-  multiplier: number; // 时间倍率 M，默认 1（实时）
+  multiplier: number;
   showOrbits: boolean;
 }>();
-
-// 配置（可用环境变量控制，这里给出合理默认）
-const BASE_WINDOW = Number(import.meta.env.VITE_CESIUM_WINDOW ?? 1800); // 每单位 M 对应的时间窗（秒）
-const BASE_SAMPLES = Number(import.meta.env.VITE_CESIUM_SAMPLES ?? 60); // 每单位 M 的基准采样数
-
-const containerRef = ref<HTMLDivElement | null>(null);
-const initError = ref<string | null>(null);
-let viewer: Cesium.Viewer | null = null;
-let building = false;
-
-// 为不同星座群分配稳定颜色
-const GROUP_COLORS: Record<string, Cesium.Color> = {};
-const PALETTE = [
-  Cesium.Color.CYAN,
-  Cesium.Color.YELLOW,
-  Cesium.Color.LIMEGREEN,
-  Cesium.Color.ORANGE,
-  Cesium.Color.MAGENTA,
-  Cesium.Color.DEEPSKYBLUE,
-  Cesium.Color.RED,
-  Cesium.Color.SPRINGGREEN,
-  Cesium.Color.GOLD,
-  Cesium.Color.TOMATO,
-  Cesium.Color.AQUA,
-  Cesium.Color.VIOLET,
-];
-let paletteIdx = 0;
-function colorForGroup(group: string): Cesium.Color {
-  if (!GROUP_COLORS[group]) {
-    GROUP_COLORS[group] = PALETTE[paletteIdx % PALETTE.length];
-    paletteIdx++;
-  }
-  return GROUP_COLORS[group];
-}
-
-function initViewer() {
-  if (!containerRef.value) return;
-  // 不使用 Cesium Ion（离线 Natural Earth II 影像）
-  Cesium.Ion.defaultAccessToken = "";
-  viewer = new Cesium.Viewer(containerRef.value, {
-    baseLayer: Cesium.ImageryLayer.fromProviderAsync(
-      Cesium.TileMapServiceImageryProvider.fromUrl(
-        Cesium.buildModuleUrl("Assets/Textures/NaturalEarthII"),
-      ),
-    ),
-    baseLayerPicker: false,
-    geocoder: false,
-    homeButton: false,
-    sceneModePicker: false,
-    navigationHelpButton: false,
-    animation: true,
-    timeline: true,
-    fullscreenButton: false,
-    infoBox: false,
-    selectionIndicator: false,
-    shouldAnimate: true,
-  });
-  viewer.scene.globe.enableLighting = false;
-  if (viewer.scene.skyAtmosphere) viewer.scene.skyAtmosphere.show = true;
-  viewer.scene.backgroundColor = Cesium.Color.BLACK;
-  viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#0b1b2b");
-  // 隐藏版权信息（开发用）
-  const credit = viewer.cesiumWidget.creditContainer as HTMLElement;
-  if (credit) credit.style.display = "none";
-  // 便于自动化调试
-  (window as unknown as { __cesiumViewer?: Cesium.Viewer }).__cesiumViewer = viewer;
-}
-
-function buildScene() {
-  if (!viewer || building) return;
-  building = true;
-  const sats = props.satellites;
-  const M = Math.max(0.1, props.multiplier);
-
-  // 时间窗随 M 变大而变长；采样数随 M 变大而变少（采样率降低）
-  const windowSec = BASE_WINDOW * M;
-  const pointSamples = Math.min(
-    200,
-    Math.max(8, Math.round(BASE_SAMPLES / M)),
-  );
-
-  const now = Cesium.JulianDate.fromDate(new Date());
-  const stop = Cesium.JulianDate.addSeconds(now, windowSec, new Cesium.JulianDate());
-
-  viewer.clock.startTime = now.clone();
-  viewer.clock.stopTime = stop.clone();
-  viewer.clock.currentTime = now.clone();
-  viewer.clock.clockRange = Cesium.ClockRange.LOOP_STOP;
-  viewer.clock.multiplier = M;
-  viewer.clock.shouldAnimate = true;
-
-  viewer.entities.removeAll();
-
-  let added = 0;
-  let skipped = 0;
-  for (const rec of sats) {
-    const satrec = parseSatrec(rec);
-    if (!satrec) {
-      skipped++;
-      continue;
-    }
-    const color = colorForGroup(rec.group_name);
-
-    // 采样范围扩展到 [now, now+2*window]，保证路径在循环播放时始终有数据
-    const track = sampleTrackEci(satrec, new Date(), windowSec * 2, pointSamples * 2);
-    if (track.length >= 2) {
-      // 位置属性使用惯性系（INERTIAL），由构造参数指定参考框架
-      const property = new Cesium.SampledPositionProperty(
-        Cesium.ReferenceFrame.INERTIAL,
-      );
-      for (const s of track) {
-        const jd = Cesium.JulianDate.fromDate(s.date);
-        property.addSample(
-          jd,
-          Cesium.Cartesian3.fromElements(s.x * 1000, s.y * 1000, s.z * 1000),
-        );
-      }
-      const entity: Cesium.Entity.ConstructorOptions = {
-        position: property,
-        point: {
-          pixelSize: 4,
-          color: color,
-          outlineColor: Cesium.Color.WHITE.withAlpha(0.4),
-          outlineWidth: 1,
-        },
-      };
-      // 轨道“未来轨迹”：沿惯性系位置属性绘制，自动随参考框架正确变换
-      if (props.showOrbits) {
-        entity.path = {
-          resolution: 30,
-          material: color.withAlpha(0.3),
-          width: 1,
-          leadTime: windowSec,
-          trailTime: 0,
-        };
-      }
-      viewer.entities.add(entity);
-      added++;
-    }
-  }
-
-  // 视角：俯瞰全球 + 轨道空间（60,000 km 高度，可同时看到 LEO 层与 GEO 带）
-  viewer.camera.setView({
-    destination: Cesium.Cartesian3.fromDegrees(10, 20, 6.0e7),
-  });
-  viewer.scene.requestRender();
-  building = false;
-  emitStats(added, skipped);
-}
 
 const emit = defineEmits<{
   (e: "stats", payload: { added: number; skipped: number }): void;
 }>();
 
-function emitStats(added: number, skipped: number) {
-  // 通过自定义事件告知父组件数量（setTimeout 避免与渲染竞争）
-  emit("stats", { added, skipped });
+const containerRef = ref<HTMLDivElement | null>(null);
+const initError = ref<string | null>(null);
+const readout = ref<SceneReadout>({
+  drawn: 0,
+  groups: [],
+  utc: "",
+  orbitLines: false,
+  building: false,
+});
+let scene: SatelliteScene | null = null;
+let readoutTimer: number | null = null;
+let debounceTimer: number | null = null;
+let lastDrawn = -1;
+
+function toInputs(sats: TleRecord[]): SatInput[] {
+  return sats.map((s) => ({
+    line1: s.line1,
+    line2: s.line2,
+    norad_id: s.norad_id,
+    name: s.name,
+    group_name: s.group_name,
+  }));
+}
+
+function rebuild() {
+  if (!scene) return;
+  scene.setData(toInputs(props.satellites), props.multiplier, props.showOrbits);
+}
+
+function scheduleRebuild() {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = window.setTimeout(rebuild, 120);
+}
+
+function pollReadout() {
+  if (!scene) return;
+  const r = scene.getReadout();
+  readout.value = r;
+  if (containerRef.value) containerRef.value.dataset.drawn = String(r.drawn);
+  if (r.drawn !== lastDrawn) {
+    lastDrawn = r.drawn;
+    emit("stats", { added: r.drawn, skipped: 0 });
+  }
 }
 
 onMounted(() => {
   try {
-    initViewer();
-    buildScene();
+    scene = new SatelliteScene();
+    scene.init(containerRef.value!);
+    rebuild();
   } catch (e) {
     initError.value = (e as Error).message || String(e);
     console.error("Cesium 初始化失败（可能缺少 WebGL 支持）:", e);
   }
+  readoutTimer = window.setInterval(pollReadout, 250);
 });
 
 watch(
   () => [props.satellites, props.multiplier, props.showOrbits],
-  () => buildScene(),
-  { deep: false },
+  () => scheduleRebuild(),
 );
 
 onBeforeUnmount(() => {
-  if (viewer) {
-    viewer.destroy();
-    viewer = null;
+  if (readoutTimer) clearInterval(readoutTimer);
+  if (debounceTimer) clearTimeout(debounceTimer);
+  if (scene) {
+    scene.destroy();
+    scene = null;
   }
 });
 </script>
@@ -199,6 +89,38 @@ onBeforeUnmount(() => {
 <template>
   <div class="cesium-root">
     <div ref="containerRef" class="cesium-container"></div>
+
+    <!-- 自定义玻璃感控制浮层（替代 Cesium 默认控件） -->
+    <div v-if="!initError" class="overlay">
+      <!-- 右上：图例 + 状态 -->
+      <div class="panel legend">
+        <div class="legend-head">
+          <span class="dot live" :class="{ off: readout.building }"></span>
+          <span class="utc">{{ readout.utc || "—" }}</span>
+        </div>
+        <div class="legend-sub">
+          已绘制 <b>{{ readout.drawn.toLocaleString() }}</b> 颗 ·
+          轨道线 <b>{{ readout.orbitLines ? "开" : "关" }}</b>
+        </div>
+        <div class="legend-list">
+          <div v-for="g in readout.groups" :key="g.name" class="lg">
+            <span class="sw" :style="{ background: g.color }"></span>
+            <span class="nm">{{ g.name }}</span>
+            <span class="ct">{{ g.count.toLocaleString() }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 右下：缩放 / 复位 -->
+      <div class="panel toolbar">
+        <button title="放大" @click="scene?.zoomIn()">+</button>
+        <button title="缩小" @click="scene?.zoomOut()">−</button>
+        <button title="复位视角" @click="scene?.resetView()">⤢</button>
+      </div>
+
+      <div v-if="readout.building" class="building">轨道计算中…</div>
+    </div>
+
     <div v-if="initError" class="cesium-fallback">
       <p>无法初始化 Cesium 三维视图（需要支持 WebGL 的浏览器环境）。</p>
       <p class="sub">{{ initError }}</p>
@@ -218,6 +140,124 @@ onBeforeUnmount(() => {
   height: 100%;
   position: absolute;
   inset: 0;
+}
+.overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+.panel {
+  position: absolute;
+  pointer-events: auto;
+  background: rgba(9, 15, 26, 0.55);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border: 1px solid rgba(140, 180, 230, 0.14);
+  border-radius: 12px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  color: #cfe3f5;
+  font-size: 12px;
+}
+.legend {
+  top: 14px;
+  right: 14px;
+  width: 188px;
+  padding: 12px;
+}
+.legend-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #36e0a0;
+  box-shadow: 0 0 8px #36e0a0;
+}
+.dot.off {
+  background: #f0b429;
+  box-shadow: 0 0 8px #f0b429;
+}
+.utc {
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.3px;
+  color: #eaf3ff;
+}
+.legend-sub {
+  margin: 6px 0 8px;
+  color: #9fb6cf;
+}
+.legend-sub b {
+  color: #eaf3ff;
+}
+.legend-list {
+  max-height: 240px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lg {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.sw {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: none;
+}
+.nm {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ct {
+  color: #9fb6cf;
+  font-variant-numeric: tabular-nums;
+}
+.toolbar {
+  right: 14px;
+  bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  padding: 6px;
+  gap: 6px;
+}
+.toolbar button {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  border: 1px solid rgba(140, 180, 230, 0.18);
+  background: rgba(20, 30, 48, 0.6);
+  color: #dcebff;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.toolbar button:hover {
+  border-color: #4ea8ff;
+  color: #fff;
+  background: rgba(40, 70, 120, 0.7);
+}
+.building {
+  position: absolute;
+  left: 50%;
+  top: 16px;
+  transform: translateX(-50%);
+  pointer-events: none;
+  padding: 6px 14px;
+  border-radius: 20px;
+  background: rgba(9, 15, 26, 0.6);
+  border: 1px solid rgba(140, 180, 230, 0.14);
+  color: #cfe3f5;
+  font-size: 12px;
 }
 .cesium-fallback {
   position: absolute;
