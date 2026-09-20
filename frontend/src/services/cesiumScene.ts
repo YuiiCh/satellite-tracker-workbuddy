@@ -103,11 +103,13 @@ export class SatelliteScene {
     if (viewer.scene.skyBox) viewer.scene.skyBox.show = true;
 
     // ---- 白色国家行政边界（离线 GeoJSON） ----
+    // 注意：不能开启 clampToGround（会被 Cesium 当作“贴地形”，从而禁用多边形
+    // 轮廓/国界白线）。改用椭球高度 0 绘制，轮廓即可正常渲染。
     Cesium.GeoJsonDataSource.load("/countries.geojson", {
-      clampToGround: true,
-      stroke: Cesium.Color.WHITE.withAlpha(0.82),
+      stroke: Cesium.Color.WHITE.withAlpha(0.92),
       fill: Cesium.Color.TRANSPARENT,
-      strokeWidth: 1.2,
+      strokeWidth: 1.5,
+      markerSize: 0,
     })
       .then((ds) => viewer.dataSources.add(ds))
       .catch((e) => console.warn("边界图层加载失败（不影响卫星渲染）:", e));
