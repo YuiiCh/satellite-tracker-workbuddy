@@ -43,11 +43,20 @@ interface ActivePayload {
   positions: Float32Array;
 }
 
+type LonLat = [number, number];
+
+interface BorderGeoJSON {
+  features: {
+    geometry: { type: string; coordinates: unknown } | null;
+  }[];
+}
+
 export class SatelliteScene {
   private viewer: Cesium.Viewer | null = null;
   private worker: Worker | null = null;
   private points: Cesium.PointPrimitiveCollection | null = null;
   private orbitLines: Cesium.PolylineCollection | null = null;
+  private borders: Cesium.PolylineCollection | null = null;
   private payload: ActivePayload | null = null;
   private colorByGroup = new Map<string, Cesium.Color>();
   private hexByGroup = new Map<string, string>();
@@ -102,17 +111,11 @@ export class SatelliteScene {
     // 星空背景（离线 tycho 星图）
     if (viewer.scene.skyBox) viewer.scene.skyBox.show = true;
 
-    // ---- 白色国家行政边界（离线 GeoJSON） ----
-    // 注意：不能开启 clampToGround（会被 Cesium 当作“贴地形”，从而禁用多边形
-    // 轮廓/国界白线）。改用椭球高度 0 绘制，轮廓即可正常渲染。
-    Cesium.GeoJsonDataSource.load("/countries.geojson", {
-      stroke: Cesium.Color.WHITE.withAlpha(0.92),
-      fill: Cesium.Color.TRANSPARENT,
-      strokeWidth: 1.5,
-      markerSize: 0,
-    })
-      .then((ds) => viewer.dataSources.add(ds))
-      .catch((e) => console.warn("边界图层加载失败（不影响卫星渲染）:", e));
+    // ---- 白色国家行政边界（离线 GeoJSON → 悬浮折线壳层） ----
+    // 说明：此前用 GeoJsonDataSource 的多边形轮廓（高度 0）。实测在移动端
+    // GPU 上轮廓与球面深度重合，会被球面完全遮挡（桌面端侥幸可见）。
+    // 改为手动把边界转成 PolylineCollection 折线并抬升 30km，跨设备确定性渲染。
+    this.loadBorders(viewer);
 
     // 隐藏版权（离线开发用）
     const credit = viewer.cesiumWidget.creditContainer as HTMLElement | null;
@@ -183,6 +186,78 @@ export class SatelliteScene {
     (window as unknown as { __cesiumViewer?: Cesium.Viewer }).__cesiumViewer =
       viewer;
     (window as unknown as { __satScene?: SatelliteScene }).__satScene = this;
+  }
+
+  /** 加载国家边界：GeoJSON → 抬升 30km 的白色折线壳层（GPU 批处理） */
+  private loadBorders(viewer: Cesium.Viewer): void {
+    const BORDER_ALT = 30000; // 抬升高度（米），避开球面深度冲突
+    const MAX_STEP = 0.5; // 测地细分步长（度），防止长弦切入球体
+    fetch("/countries.geojson")
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((gj: BorderGeoJSON) => {
+        if (!this.viewer || this.viewer.isDestroyed()) return;
+        const lines = new Cesium.PolylineCollection();
+        const mat = Cesium.Material.fromType("Color", {
+          color: Cesium.Color.WHITE.withAlpha(0.9),
+        });
+        let n = 0;
+        for (const f of gj.features ?? []) {
+          const g = f?.geometry;
+          if (!g) continue;
+          const polys: LonLat[][][] =
+            g.type === "Polygon"
+              ? [g.coordinates as LonLat[][]]
+              : g.type === "MultiPolygon"
+                ? (g.coordinates as LonLat[][][])
+                : [];
+          for (const poly of polys) {
+            for (const ring of poly) {
+              if (!ring || ring.length < 3) continue;
+              const flat: number[] = [];
+              for (let k = 0; k < ring.length; k++) {
+                const a = ring[k];
+                const b = ring[(k + 1) % ring.length]; // 闭合环
+                const lon1 = a[0];
+                const lat1 = a[1];
+                let lon2 = b[0];
+                const lat2 = b[1];                // 跨 antimeridian 时调整经差，保证插值走短弧
+                const d = lon2 - lon1;
+                if (d > 180) lon2 -= 360;
+                else if (d < -180) lon2 += 360;
+                const span = Math.max(
+                  Math.abs(lon2 - lon1),
+                  Math.abs(lat2 - lat1),
+                );
+                const steps = Math.max(1, Math.ceil(span / MAX_STEP));
+                for (let s = 0; s < steps; s++) {
+                  const t = s / steps;
+                  flat.push(
+                    lon1 + (lon2 - lon1) * t,
+                    lat1 + (lat2 - lat1) * t,
+                    BORDER_ALT,
+                  );
+                }
+              }
+              const positions = Cesium.Cartesian3.fromDegreesArrayHeights(flat);
+              if (positions.length < 2) continue;
+              lines.add({ positions, width: 1.5, material: mat });
+              n++;
+            }
+          }
+        }
+        this.borders = lines;
+        viewer.scene.primitives.add(lines);
+        (
+          window as unknown as {
+            __cesiumBorders?: Cesium.PolylineCollection;
+          }
+        ).__cesiumBorders = lines;
+        console.info(`边界图层：${n} 条折线已加载`);
+      })
+      .catch((e) => console.warn("边界图层加载失败（不影响卫星渲染）:", e));
   }
 
   private colorForGroup(group: string): Cesium.Color {
@@ -427,6 +502,13 @@ export class SatelliteScene {
       this.worker = null;
     }
     this.clearCollections();
+    if (this.borders && this.viewer) {
+      this.viewer.scene.primitives.remove(this.borders);
+      this.borders = null;
+      (
+        window as unknown as { __cesiumBorders?: Cesium.PolylineCollection }
+      ).__cesiumBorders = undefined;
+    }
     if (this.viewer) {
       if (this.tickListener) {
         this.viewer.clock.onTick.removeEventListener(this.tickListener);
